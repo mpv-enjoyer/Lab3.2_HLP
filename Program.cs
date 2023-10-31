@@ -37,16 +37,24 @@ streamStorage.Close();
 
 List<int> orders = new();
 
-StreamReader streamOrders = new("Orders.txt");
+/*StreamReader streamOrders = new("Orders.txt");
 do
 {
     current_line = streamOrders.ReadLine();
     orders.Add(int.Parse(current_line));
 } while (!streamOrders.EndOfStream);
-streamOrders.Close();
+streamOrders.Close();*/
 
 Queue<int> order_queue = new();
 int current_order_id = 0;
+
+Cook testcook1 = new(30);
+Order testorder1 = new();
+Console.WriteLine(testcook1.isFree());
+testorder1.SetCook(testcook1);
+Console.WriteLine(testcook1.isFree());
+return 0;
+
 do
 {
     //Начало тика. Проверяем, есть ли новый заказ.
@@ -62,106 +70,151 @@ do
         int[] order_ids;
         if (courier.Tick(out order_ids) && order_ids.Count() != 0)
         {
-            Console.WriteLine()
+            Console.WriteLine();
         }
     }
     foreach (Cook cook in cooks) cook.Tick(out int a);
 
 } while (orders.Count != 0);
 
+public enum CookStatus
+{
+    Free = 0,
+    InProcess = 1,
+    Waiting = 2
+}
+
 public class Cook
 {
+    CookStatus Status = CookStatus.Free;
     int RemainingBusyTime { get; set; } = 0;
     public int Experience { get; }
     int MaxTime { get; } = 40;
-    int CurrentOrderID = -1;
     public Cook(int experience) => Experience = Math.Min(experience, 40);
-    public int NewOrder(int order_id)
+    public int NewOrder()
     {
-        if (RemainingBusyTime != 0 || CurrentOrderID != -1) throw new Exception("This cook is not free.");
+        if (Status != CookStatus.Free) throw new Exception("This cook is not free.");
         RemainingBusyTime = Math.Max(MaxTime * Experience / 80, MaxTime / 2);
-        CurrentOrderID = order_id;
+        Status = CookStatus.InProcess;
         return Math.Max(MaxTime * Experience / 80, MaxTime / 2);
     }
-    public bool Tick(out int order_id) //Возвращает, свободен ли сейчас
+    public void Tick()
     {
-        order_id = CurrentOrderID;
-        if (RemainingBusyTime == 0) return true;
+        if (Status != CookStatus.InProcess) return;
         RemainingBusyTime -= 1;
-        return RemainingBusyTime == 0;
+        if (RemainingBusyTime == 0) Status = CookStatus.Waiting;
     }
-    public bool isFree()
+    public CookStatus GetStatus()
     {
-        return CurrentOrderID == 0;
+        return Status;
     }
     public void Free()
     {
         if (RemainingBusyTime != 0) throw new Exception("Cannot free this cook.");
-        CurrentOrderID = -1;
     }
 }
+
+public enum CourierStatus
+{
+    Free = 0,
+    InProcess = 1,
+}
+
 class Courier
 {
-    int WasBuzyFor { get; set; } = 0;
     public int Stamina { get; set; }
     int RemainingBusyTime { get; set; } = 0;
     public int Strength { get; }
     public int Capacity { get; }
     int MaxTime { get; } = 80;
-    int[] CurrentOrderIDs;
+    CourierStatus status = CourierStatus.Free;
     public Courier(int stamina, int strength, int capacity)
     {
         Capacity = capacity;
-        CurrentOrderIDs = new int[capacity];
         Stamina = Math.Min(stamina, 40);
         Strength = Math.Min(strength, 40);
     }
-    public int NewOrder(int[] order_ids)
+    public int NewOrder()
     {
-        CurrentOrderIDs = order_ids;
         RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 2) * (40 - Strength), MaxTime / 2);
         Stamina = (Stamina == 0) ? 0 : Stamina -= 1;
-        WasBuzyFor = RemainingBusyTime;
+        status = CourierStatus.InProcess;
         return RemainingBusyTime;
     }
-    public bool Tick(out int[] order_ids) //Возвращает, свободен ли сейчас
+    public void Tick()
     {
-        order_ids = CurrentOrderIDs;
-        if (RemainingBusyTime == 0) return true;
+        if (status == CourierStatus.Free) return;
         RemainingBusyTime -= 1;
-        if (RemainingBusyTime == 0)
-        {
-            CurrentOrderIDs = Array.Empty<int>();
-            return true;
-        }
-        return false;
-    }
-    public void Report()
-    {
-        Console.WriteLine()
+        if (RemainingBusyTime == 0) status = CourierStatus.Free;
     }
 }
 class Storage
 {
     public int Capacity { get; }
-    Queue<int> Orders { get; set; }
+    Queue<Order> Orders { get; set; }
     public Storage(int capacity)
     {
         Capacity = Math.Min(capacity, 15);
-        Orders = new Queue<int>(Capacity);
+        Orders = new Queue<Order>(Capacity);
     }
-    public bool NewOrder(int order_id)
+    public bool NewOrder(Order new_order)
     {
         if (Orders.Count == Capacity) return false;
-        Orders.Enqueue(order_id);
+        Orders.Enqueue(new_order);
         return true;
     }
     public bool IsEmpty()
     {
         return Orders.Count == 0;
     }
-    public int Pick()
+    public Order Pick()
     {
         return Orders.Dequeue();
+    }
+}
+
+public enum OrderStatus
+{
+    NoAvailableCook = 0,
+    Cooking = 1,
+    NoAvailableStorage = 2,
+    Storing = 3,
+    Delivering = 4,
+    Done = 5 //unused?
+}
+
+class Order
+{
+    OrderStatus Stage = 0;
+    int TicksOnThisStage = 0;
+    Cook? CurrentCook;
+    Courier? CurrentCourier;
+    Storage CommonStorage;
+    public Order(Storage storage) 
+    {
+        CommonStorage = storage;
+    }
+    public OrderStatus GetStage() { return Stage; }
+    public int GetTicks() { return TicksOnThisStage; }
+    public void SetCook(Cook new_cook)
+    {
+        CurrentCook = new_cook;
+    }
+    public void SetCourier(Courier new_courier)
+    {
+        CurrentCourier = new_courier;
+    }
+    public void UpdateOrder()
+    {
+        if (Stage == OrderStatus.Cooking)
+        {
+            CurrentCook.Tick();
+            if (CurrentCook.GetStatus() == CookStatus.Waiting)
+            {
+                if (CommonStorage.NewOrder())
+                Stage = OrderStatus.NoAvailableStorage;
+            }
+        }
+        if (Stage == OrderStatus.Delivering) CurrentCourier.Tick();
     }
 }
