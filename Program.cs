@@ -1,4 +1,5 @@
 ﻿using System.Text.Json;
+
 /* Предполагаем, что:
    Есть всего лишь 1 вид пиццы
    Есть только один дом для доставки
@@ -7,10 +8,10 @@
    Максимальная вместимость очереди - 15 заказов
    Параметр выносливости падает в течение дня, восстанавливается на следующий день
    Всё время измеряется в минутах
-   Длительность рабочего дня - 10 часов => 600 минут
+   Длительность рабочего дня определяется входными данными.
    При поступлении нового заказа выбираем первого попавшегося повара / курьера
 
-   Заказы тоже хранятся в файле: в виде INT_МИНУТ_БЕЗ_ЗАКАЗА INT_МИНУТ_БЕЗ_ЗАКАЗА ...*/
+   Заказы тоже хранятся в файле: в виде INT_МИНУТ_БЕЗ_ЗАКАЗА\nINT_МИНУТ_БЕЗ_ЗАКАЗА ...*/
 
 List<Courier> couriers = new();
 List<Cook> cooks = new();
@@ -42,8 +43,31 @@ do
     current_line = streamOrders.ReadLine();
     orders.Add(int.Parse(current_line));
 } while (!streamOrders.EndOfStream);
+streamOrders.Close();
 
+Queue<int> order_queue = new();
+int current_order_id = 0;
+do
+{
+    //Начало тика. Проверяем, есть ли новый заказ.
+    bool new_order = orders[0] == 0;
+    if (new_order) orders.RemoveAt(0); else orders[0] -= 1;
+    if (new_order)
+    {
+        order_queue.Enqueue(current_order_id);
+        current_order_id++;
+    }
+    foreach (Courier courier in couriers)
+    {
+        int[] order_ids;
+        if (courier.Tick(out order_ids) && order_ids.Count() != 0)
+        {
+            Console.WriteLine()
+        }
+    }
+    foreach (Cook cook in cooks) cook.Tick(out int a);
 
+} while (orders.Count != 0);
 
 public class Cook
 {
@@ -54,6 +78,7 @@ public class Cook
     public Cook(int experience) => Experience = Math.Min(experience, 40);
     public int NewOrder(int order_id)
     {
+        if (RemainingBusyTime != 0 || CurrentOrderID != -1) throw new Exception("This cook is not free.");
         RemainingBusyTime = Math.Max(MaxTime * Experience / 80, MaxTime / 2);
         CurrentOrderID = order_id;
         return Math.Max(MaxTime * Experience / 80, MaxTime / 2);
@@ -63,16 +88,21 @@ public class Cook
         order_id = CurrentOrderID;
         if (RemainingBusyTime == 0) return true;
         RemainingBusyTime -= 1;
-        if (RemainingBusyTime == 0)
-        {
-            CurrentOrderID = -1;
-            return true;
-        }
-        return false;
+        return RemainingBusyTime == 0;
+    }
+    public bool isFree()
+    {
+        return CurrentOrderID == 0;
+    }
+    public void Free()
+    {
+        if (RemainingBusyTime != 0) throw new Exception("Cannot free this cook.");
+        CurrentOrderID = -1;
     }
 }
 class Courier
 {
+    int WasBuzyFor { get; set; } = 0;
     public int Stamina { get; set; }
     int RemainingBusyTime { get; set; } = 0;
     public int Strength { get; }
@@ -91,6 +121,7 @@ class Courier
         CurrentOrderIDs = order_ids;
         RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 2) * (40 - Strength), MaxTime / 2);
         Stamina = (Stamina == 0) ? 0 : Stamina -= 1;
+        WasBuzyFor = RemainingBusyTime;
         return RemainingBusyTime;
     }
     public bool Tick(out int[] order_ids) //Возвращает, свободен ли сейчас
@@ -104,6 +135,10 @@ class Courier
             return true;
         }
         return false;
+    }
+    public void Report()
+    {
+        Console.WriteLine()
     }
 }
 class Storage
@@ -125,7 +160,7 @@ class Storage
     {
         return Orders.Count == 0;
     }
-    public int PeekOrder()
+    public int Pick()
     {
         return Orders.Dequeue();
     }
