@@ -1,4 +1,7 @@
-﻿using System.Text.Json;
+﻿using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
+using System.Security.Cryptography.X509Certificates;
+using System.Text.Json;
 
 /* Предполагаем, что:
    Есть всего лишь 1 вид пиццы
@@ -19,7 +22,6 @@ List<Cook> cooks = new();
 string current_line;
 StreamReader streamCouriers = new("Couriers.json");
 StreamReader streamCooks = new("Cooks.json");
-StreamReader streamStorage = new("Storage.json");
 do
 {
     current_line = streamCouriers.ReadLine();
@@ -30,52 +32,186 @@ do
     current_line = streamCooks.ReadLine();
     cooks.Add(JsonSerializer.Deserialize<Cook>(current_line));
 } while (!streamCooks.EndOfStream);
-Storage storage = JsonSerializer.Deserialize<Storage>(streamStorage.ReadLine());
 streamCouriers.Close();
 streamCooks.Close();
-streamStorage.Close();
 
-List<int> orders = new();
-
-/*StreamReader streamOrders = new("Orders.txt");
+Queue<OrderTimeline> incoming_orders = new();
+StreamReader streamOrders = new("Orders.txt");
 do
 {
     current_line = streamOrders.ReadLine();
-    orders.Add(int.Parse(current_line));
+    if (!int.TryParse(current_line, out int f)) continue;
+    incoming_orders.Enqueue(new OrderTimeline(int.Parse(current_line)));
 } while (!streamOrders.EndOfStream);
-streamOrders.Close();*/
+streamOrders.Close();
 
-Queue<int> order_queue = new();
-int current_order_id = 0;
+Queue<Order> orders_wait_for_cook = new();
+Queue<Cook> cooks_wait_for_order = new();
+List<Order> orders_cooking = new();
+Queue<Order> orders_wait_for_storage = new();
+Queue<Order> orders_wait_for_courier = new();
+Queue<Courier> couriers_wait_for_orders = new();
+List<Order> orders_delivering = new();
+List<Order> orders_finished = new();
 
-Cook testcook1 = new(30);
-Order testorder1 = new();
-Console.WriteLine(testcook1.isFree());
-testorder1.SetCook(testcook1);
-Console.WriteLine(testcook1.isFree());
-return 0;
+foreach (var cook in cooks)
+{
+    cooks_wait_for_order.Enqueue(cook);
+}
+foreach (var courier in couriers)
+{
+    couriers_wait_for_orders.Enqueue(courier);
+}
+
+const int max_storage = 15;
+const int time_deliver = 60;
+int current_tick = 0;
+
+bool must_continue;
 
 do
 {
-    //Начало тика. Проверяем, есть ли новый заказ.
-    bool new_order = orders[0] == 0;
-    if (new_order) orders.RemoveAt(0); else orders[0] -= 1;
-    if (new_order)
+    //Тик для каждого работника
+    foreach (var cook in cooks) cook.Tick();
+    foreach (var courier in couriers) courier.Tick();
+
+    //Начинаем сверху, освобождаем курьеров
+    List<Order> orders_transitioned_from_delivering = new();
+    foreach (var order in orders_delivering)
     {
-        order_queue.Enqueue(current_order_id);
-        current_order_id++;
-    }
-    foreach (Courier courier in couriers)
-    {
-        int[] order_ids;
-        if (courier.Tick(out order_ids) && order_ids.Count() != 0)
+        if (order.Tick())
         {
-            Console.WriteLine();
+            orders_finished.Add(order);
+            bool is_repeating = false;
+            foreach (var ord in orders_transitioned_from_delivering)
+            {
+                if (ord.GetCourier() == order.GetCourier()) is_repeating = true;
+            }
+            if (!is_repeating) couriers_wait_for_orders.Enqueue(order.GetCourier());
+            orders_transitioned_from_delivering.Add(order);
         }
     }
-    foreach (Cook cook in cooks) cook.Tick(out int a);
+    foreach (var order in orders_transitioned_from_delivering)
+    {
+        orders_delivering.Remove(order);
+    }
 
-} while (orders.Count != 0);
+    //Занимаем курьеров заказами со склада и заказами, ожидающими места в складе
+    foreach (var order in orders_wait_for_courier)
+    {
+        order.Tick();
+    }
+    for (int i = 0; i < couriers_wait_for_orders.Count; i++)
+    {
+        if (orders_wait_for_courier.Count == 0 && orders_wait_for_storage.Count == 0) break;
+        Courier courier = couriers_wait_for_orders.Dequeue();
+        int capacity_left = courier.Capacity - Math.Min(orders_wait_for_courier.Count, courier.Capacity);
+        int steps = Math.Min(orders_wait_for_courier.Count, courier.Capacity);
+        for (int j = 0; j < steps; j++)
+        {
+            Order order = orders_wait_for_courier.Dequeue();
+            orders_delivering.Add(order);
+            order.SetCourier(courier);
+        }
+        steps = Math.Min(orders_wait_for_storage.Count, capacity_left);
+        for (int j = 0; j < steps; j++)
+        {
+            Order order = orders_wait_for_storage.Dequeue();
+            orders_delivering.Add(order);
+            order.FreeCook();
+            cooks_wait_for_order.Enqueue(order.GetCook());
+            order.SetCourier(courier);
+        }
+    }
+
+    //Оставшиеся заказы перемещаются в склад, если в нём освободилось место
+    int orders_wait_storage_count = orders_wait_for_storage.Count;
+    for (int i = 0; i < orders_wait_storage_count; i++)
+    {
+        if (orders_wait_for_courier.Count < max_storage)
+        {
+            var order = orders_wait_for_storage.Dequeue();
+            cooks_wait_for_order.Enqueue(order.GetCook());
+            order.FreeCook();
+            orders_wait_for_courier.Enqueue(order);
+            order.Tick();
+        }
+        else break;
+    }
+
+    //Приготовленные заказы попытаемся положить на склад, но если не получится,
+    //повар будет ждать места, с заказом в orders_wait_for_courier.
+    //Заказы, находящиеся в процессе готовки, не изменяем.
+    List<Order> orders_transitioned_from_cooking = new();
+    foreach (var order in orders_cooking)
+    {
+        bool cooked = order.Tick();
+        if (!cooked) continue;
+        orders_transitioned_from_cooking.Add(order);
+        if (orders_wait_for_courier.Count == max_storage)
+        {
+            orders_wait_for_storage.Enqueue(order);
+            continue;
+        }
+        cooks_wait_for_order.Enqueue(order.GetCook());
+        order.FreeCook();
+        orders_wait_for_courier.Enqueue(order);
+    }
+    foreach (var order in orders_transitioned_from_cooking)
+    {
+        orders_cooking.Remove(order);
+    }
+
+    //Ищем пары (свободный повар - ожидающий повара заказ)
+    foreach (var order in orders_wait_for_cook)
+    {
+        order.Tick();
+    }
+    int temp_steps = Math.Min(orders_wait_for_cook.Count, cooks_wait_for_order.Count);
+    for (int i = 0; i < temp_steps; i++)
+    {
+        var order = orders_wait_for_cook.Dequeue();
+        var cook = cooks_wait_for_order.Dequeue();
+        orders_cooking.Add(order);
+        order.SetCook(cook);
+    }
+
+    //Добавляем заказов в ожидающие, если так нужно по таймлайну из файла
+    if (incoming_orders.Count != 0)
+    {
+        incoming_orders.Peek().Tick();
+        while (incoming_orders.Count != 0 && incoming_orders.Peek().ticks == 0)
+        {
+            incoming_orders.Dequeue();
+            orders_wait_for_cook.Enqueue(new Order(time_deliver));
+        }
+    }
+    current_tick++;
+    must_continue = orders_cooking.Count != 0 || orders_delivering.Count != 0 || orders_wait_for_cook.Count != 0
+        || orders_wait_for_courier.Count != 0 || orders_wait_for_storage.Count != 0;
+
+    Console.Write($"{current_tick} ");
+    for (int i = 0; i < orders_wait_for_cook.Count; i++)
+    {
+        Console.Write(".");
+    }
+    Console.Write(" ");
+    for (int i = 0; i < cooks.Count; i++)
+    {
+        Console.Write($"{cooks[i].GetStatus()} ");
+    }
+    Console.Write(" _ ");
+    for (int i = 0; i < orders_wait_for_courier.Count; i++)
+    {
+        Console.Write(".");
+    }
+    Console.Write(" ");
+    for (int i = 0; i < couriers.Count; i++)
+    {
+        Console.Write($"{couriers[i].GetStatus()}[{couriers[i].GetCapacityLeft()}] ");
+    }
+    Console.WriteLine(";");
+} while (must_continue);
 
 public enum CookStatus
 {
@@ -111,6 +247,7 @@ public class Cook
     public void Free()
     {
         if (RemainingBusyTime != 0) throw new Exception("Cannot free this cook.");
+        Status = CookStatus.Free;
     }
 }
 
@@ -126,50 +263,42 @@ class Courier
     int RemainingBusyTime { get; set; } = 0;
     public int Strength { get; }
     public int Capacity { get; }
+    int capacity_left;
     int MaxTime { get; } = 80;
     CourierStatus status = CourierStatus.Free;
     public Courier(int stamina, int strength, int capacity)
     {
         Capacity = capacity;
+        capacity_left = capacity;
         Stamina = Math.Min(stamina, 40);
         Strength = Math.Min(strength, 40);
     }
     public int NewOrder()
     {
-        RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 2) * (40 - Strength), MaxTime / 2);
+        RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 3) * (40 - Strength / 3) / 1600, MaxTime / 2);
         Stamina = (Stamina == 0) ? 0 : Stamina -= 1;
         status = CourierStatus.InProcess;
+        if (capacity_left <= 0) throw new Exception("not enough capacity");
+        capacity_left--;
         return RemainingBusyTime;
     }
     public void Tick()
     {
         if (status == CourierStatus.Free) return;
         RemainingBusyTime -= 1;
-        if (RemainingBusyTime == 0) status = CourierStatus.Free;
+        if (RemainingBusyTime == 0)
+        {
+            capacity_left = Capacity;
+            status = CourierStatus.Free;
+        }
     }
-}
-class Storage
-{
-    public int Capacity { get; }
-    Queue<Order> Orders { get; set; }
-    public Storage(int capacity)
+    public CourierStatus GetStatus()
     {
-        Capacity = Math.Min(capacity, 15);
-        Orders = new Queue<Order>(Capacity);
+        return status;
     }
-    public bool NewOrder(Order new_order)
+    public int GetCapacityLeft()
     {
-        if (Orders.Count == Capacity) return false;
-        Orders.Enqueue(new_order);
-        return true;
-    }
-    public bool IsEmpty()
-    {
-        return Orders.Count == 0;
-    }
-    public Order Pick()
-    {
-        return Orders.Dequeue();
+        return capacity_left;
     }
 }
 
@@ -180,41 +309,80 @@ public enum OrderStatus
     NoAvailableStorage = 2,
     Storing = 3,
     Delivering = 4,
-    Done = 5 //unused?
+    Done = 5
 }
 
 class Order
 {
-    OrderStatus Stage = 0;
-    int TicksOnThisStage = 0;
+    OrderStatus Stage;
     Cook? CurrentCook;
     Courier? CurrentCourier;
-    Storage CommonStorage;
-    public Order(Storage storage) 
-    {
-        CommonStorage = storage;
-    }
-    public OrderStatus GetStage() { return Stage; }
-    public int GetTicks() { return TicksOnThisStage; }
+    int ticks = 0;
+    int ticks_awaited { get; }
+    public Order(int ticks_remaining) { ticks_awaited = ticks_remaining; }
     public void SetCook(Cook new_cook)
     {
         CurrentCook = new_cook;
+        Stage = OrderStatus.Cooking;
+        CurrentCook.NewOrder();
+    }
+    public void FreeCook()
+    {
+        CurrentCook.Free();
     }
     public void SetCourier(Courier new_courier)
     {
+        if (CurrentCook == null) throw new Exception("Setting courier before cook was set");
         CurrentCourier = new_courier;
+        Stage = OrderStatus.Delivering;
+        CurrentCourier.NewOrder();
     }
-    public void UpdateOrder()
+    public Cook GetCook()
     {
-        if (Stage == OrderStatus.Cooking)
+        return CurrentCook;
+    }
+    public Courier GetCourier()
+    {
+        return CurrentCourier;
+    }
+    public bool Tick()
+    {
+        ticks++;
+        switch (Stage)
         {
-            CurrentCook.Tick();
-            if (CurrentCook.GetStatus() == CookStatus.Waiting)
-            {
-                if (CommonStorage.NewOrder())
-                Stage = OrderStatus.NoAvailableStorage;
-            }
+            case OrderStatus.Cooking:
+                if (CurrentCook.GetStatus() == CookStatus.Waiting)
+                {
+                    Stage = OrderStatus.NoAvailableStorage;
+                    return true;
+                }
+                break;
+            case OrderStatus.Delivering:
+                if (CurrentCourier.GetStatus() == CourierStatus.Free)
+                {
+                    Stage = OrderStatus.Done;
+                    return true;
+                }
+                break;
         }
-        if (Stage == OrderStatus.Delivering) CurrentCourier.Tick();
+        return false;
+    }
+    public bool IsInTime()
+    {
+        if (CurrentCook == null || CurrentCourier == null || Stage != OrderStatus.Done) throw new Exception("This order wasn't finished");
+        return ticks <= ticks_awaited;
+    }
+}
+
+class OrderTimeline
+{
+    public int ticks { get; set; }
+    public OrderTimeline(int ticks)
+    {
+        this.ticks = ticks;
+    }
+    public void Tick()
+    {
+        ticks--;
     }
 }
