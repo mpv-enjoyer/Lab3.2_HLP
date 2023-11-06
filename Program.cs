@@ -1,7 +1,9 @@
 ﻿using System.Collections.Generic;
+using System.Diagnostics.Metrics;
 using System.Runtime.ExceptionServices;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
+
 
 /* Предполагаем, что:
    Есть всего лишь 1 вид пиццы
@@ -12,7 +14,7 @@ using System.Text.Json;
    Параметр выносливости падает в течение дня, восстанавливается на следующий день
    Всё время измеряется в минутах
    Длительность рабочего дня определяется входными данными.
-   При поступлении нового заказа выбираем первого попавшегося повара / курьера
+   При поступлении нового заказа выбираем повара / курьера по системе очередей
 
    Заказы тоже хранятся в файле: в виде INT_МИНУТ_БЕЗ_ЗАКАЗА\nINT_МИНУТ_БЕЗ_ЗАКАЗА ...*/
 
@@ -64,13 +66,16 @@ foreach (var courier in couriers)
 }
 
 const int max_storage = 15;
-const int time_deliver = 60;
+const int time_deliver = 110;
 int current_tick = 0;
 
 bool must_continue;
+int current_order_id = 1;
 
 do
 {
+    bool logs_changed = false;
+
     //Тик для каждого работника
     foreach (var cook in cooks) cook.Tick();
     foreach (var courier in couriers) courier.Tick();
@@ -87,7 +92,12 @@ do
             {
                 if (ord.GetCourier() == order.GetCourier()) is_repeating = true;
             }
-            if (!is_repeating) couriers_wait_for_orders.Enqueue(order.GetCourier());
+            if (!is_repeating)
+            {
+                couriers_wait_for_orders.Enqueue(order.GetCourier());
+            }
+            Console.WriteLine($"Order {order.id} delivered by Courier {order.GetCourier().id}. In time: {order.IsInTime()}");
+            logs_changed = true;
             orders_transitioned_from_delivering.Add(order);
         }
     }
@@ -112,6 +122,8 @@ do
             Order order = orders_wait_for_courier.Dequeue();
             orders_delivering.Add(order);
             order.SetCourier(courier);
+            Console.WriteLine($"Order {order.id} taken by Courier {courier.id} from storage.");
+            logs_changed = true;
         }
         steps = Math.Min(orders_wait_for_storage.Count, capacity_left);
         for (int j = 0; j < steps; j++)
@@ -121,6 +133,8 @@ do
             order.FreeCook();
             cooks_wait_for_order.Enqueue(order.GetCook());
             order.SetCourier(courier);
+            Console.WriteLine($"Order {order.id} taken by Courier {courier.id} from Cook {order.GetCook().id}.");
+            logs_changed = true;
         }
     }
 
@@ -135,6 +149,8 @@ do
             order.FreeCook();
             orders_wait_for_courier.Enqueue(order);
             order.Tick();
+            Console.WriteLine($"Order {order.id} from Cook {order.GetCook().id} now in storage.");
+            logs_changed = true;
         }
         else break;
     }
@@ -151,11 +167,15 @@ do
         if (orders_wait_for_courier.Count == max_storage)
         {
             orders_wait_for_storage.Enqueue(order);
+            Console.WriteLine($"Order {order.id} from Cook {order.GetCook().id} is ready and is now waiting for storage.");
+            logs_changed = true;
             continue;
         }
         cooks_wait_for_order.Enqueue(order.GetCook());
         order.FreeCook();
         orders_wait_for_courier.Enqueue(order);
+        Console.WriteLine($"Order {order.id} from Cook {order.GetCook().id} is ready and in storage.");
+        logs_changed = true;
     }
     foreach (var order in orders_transitioned_from_cooking)
     {
@@ -174,6 +194,8 @@ do
         var cook = cooks_wait_for_order.Dequeue();
         orders_cooking.Add(order);
         order.SetCook(cook);
+        Console.WriteLine($"Order {order.id} now has a Cook {order.GetCook().id}");
+        logs_changed = true;
     }
 
     //Добавляем заказов в ожидающие, если так нужно по таймлайну из файла
@@ -183,13 +205,17 @@ do
         while (incoming_orders.Count != 0 && incoming_orders.Peek().ticks == 0)
         {
             incoming_orders.Dequeue();
-            orders_wait_for_cook.Enqueue(new Order(time_deliver));
+            orders_wait_for_cook.Enqueue(new Order(time_deliver, current_order_id));
+            Console.WriteLine($"Order {current_order_id} has been placed in a queue for a cook.");
+            logs_changed = true;
+            current_order_id++;
         }
     }
     current_tick++;
     must_continue = orders_cooking.Count != 0 || orders_delivering.Count != 0 || orders_wait_for_cook.Count != 0
         || orders_wait_for_courier.Count != 0 || orders_wait_for_storage.Count != 0;
 
+    if (!logs_changed) continue;
     Console.Write($"{current_tick} ");
     for (int i = 0; i < orders_wait_for_cook.Count; i++)
     {
@@ -210,97 +236,95 @@ do
     {
         Console.Write($"{couriers[i].GetStatus()}[{couriers[i].GetCapacityLeft()}] ");
     }
-    Console.WriteLine(";");
+    Console.WriteLine("|");
+    Console.WriteLine("=====================================");
 } while (must_continue);
 
-public enum CookStatus
+float succeded_orders = 0;
+foreach (var order in orders_finished)
 {
-    Free = 0,
-    InProcess = 1,
-    Waiting = 2
+    if (order.IsInTime())
+    {
+        order.GetCook().Succeed();
+        order.GetCourier().Succeed();
+        succeded_orders++;
+    }
+    else
+    {
+        order.GetCook().Fail();
+        order.GetCourier().Fail();
+    }
+    if (order.IsInTime()) Console.Write("+");
+    else Console.Write("-");
 }
 
-public class Cook
+Console.WriteLine("");
+//Если меньше 90% заказов были оплачены, ищем ошибки.
+if (succeded_orders / orders_finished.Count < 0.99)
 {
-    CookStatus Status = CookStatus.Free;
-    int RemainingBusyTime { get; set; } = 0;
-    public int Experience { get; }
-    int MaxTime { get; } = 40;
-    public Cook(int experience) => Experience = Math.Min(experience, 40);
-    public int NewOrder()
+    bool advice_given = false;
+    List<int> done = new();
+    List<float> ratios = new();
+    for (int i = 0; i < couriers.Count; i++) //Проверяем курьеров на работоспособность
     {
-        if (Status != CookStatus.Free) throw new Exception("This cook is not free.");
-        RemainingBusyTime = Math.Max(MaxTime * Experience / 80, MaxTime / 2);
-        Status = CookStatus.InProcess;
-        return Math.Max(MaxTime * Experience / 80, MaxTime / 2);
+        done.Add(couriers[i].Delivered());
+        ratios.Add(couriers[i].Ratio());
     }
-    public void Tick()
+    for (int i = 0; i < couriers.Count; i++)
     {
-        if (Status != CookStatus.InProcess) return;
-        RemainingBusyTime -= 1;
-        if (RemainingBusyTime == 0) Status = CookStatus.Waiting;
-    }
-    public CookStatus GetStatus()
-    {
-        return Status;
-    }
-    public void Free()
-    {
-        if (RemainingBusyTime != 0) throw new Exception("Cannot free this cook.");
-        Status = CookStatus.Free;
-    }
-}
-
-public enum CourierStatus
-{
-    Free = 0,
-    InProcess = 1,
-}
-
-class Courier
-{
-    public int Stamina { get; set; }
-    int RemainingBusyTime { get; set; } = 0;
-    public int Strength { get; }
-    public int Capacity { get; }
-    int capacity_left;
-    int MaxTime { get; } = 80;
-    CourierStatus status = CourierStatus.Free;
-    public Courier(int stamina, int strength, int capacity)
-    {
-        Capacity = capacity;
-        capacity_left = capacity;
-        Stamina = Math.Min(stamina, 40);
-        Strength = Math.Min(strength, 40);
-    }
-    public int NewOrder()
-    {
-        RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 3) * (40 - Strength / 3) / 1600, MaxTime / 2);
-        Stamina = (Stamina == 0) ? 0 : Stamina -= 1;
-        status = CourierStatus.InProcess;
-        if (capacity_left <= 0) throw new Exception("not enough capacity");
-        capacity_left--;
-        return RemainingBusyTime;
-    }
-    public void Tick()
-    {
-        if (status == CourierStatus.Free) return;
-        RemainingBusyTime -= 1;
-        if (RemainingBusyTime == 0)
+        if (done.Average() / 3 > done[i] && ratios.Average() / 3 > ratios[i])
         {
-            capacity_left = Capacity;
-            status = CourierStatus.Free;
+            Console.WriteLine($"Уволить курьера {i}");
+            advice_given = true;
         }
     }
-    public CourierStatus GetStatus()
+    if (advice_given) return;
+    done.Clear();
+    ratios.Clear();
+    for (int i = 0; i < cooks.Count; i++) //Проверяем поваров на работоспособность
     {
-        return status;
+        done.Add(cooks[i].Cooked());
+        ratios.Add(cooks[i].Ratio());
     }
-    public int GetCapacityLeft()
+    for (int i = 0; i < cooks.Count; i++)
     {
-        return capacity_left;
+        if (done.Average() / 3 > done[i] && ratios.Average() / 3 > ratios[i])
+        {
+            Console.WriteLine($"Уволить повара {i}");
+            advice_given = true;
+        }
     }
+    if (advice_given) return;
+    ratios.Clear();
+    for (int i = 0; i < orders_finished.Count; i++)
+    {
+        ratios.Add(orders_finished[i].WaitForCookRatio());
+    }
+    if (ratios.Average() > 0.2)
+    {
+        Console.WriteLine("Нанять повара.");
+        advice_given = true;
+    }
+    ratios.Clear();
+    for (int i = 0; i < orders_finished.Count; i++)
+    {
+        ratios.Add(orders_finished[i].WaitForStorageRatio());
+    }
+    if (ratios.Average() > 0.2)
+    {
+        Console.WriteLine("Увеличить пространство на складе.");
+        advice_given = true;
+    }
+    if (advice_given) return;
+    Console.WriteLine("Нанять курьера.");
 }
+else
+{
+    Console.WriteLine($"{succeded_orders / orders_finished.Count * 100}% заказов было доставлено вовремя");
+    Console.WriteLine("Увеличить количество заказов.");
+}
+
+
 
 public enum OrderStatus
 {
@@ -314,14 +338,22 @@ public enum OrderStatus
 
 class Order
 {
+    public int id { get; }
     OrderStatus Stage;
     Cook? CurrentCook;
     Courier? CurrentCourier;
     int ticks = 0;
     int ticks_awaited { get; }
-    public Order(int ticks_remaining) { ticks_awaited = ticks_remaining; }
+    int ticks_waiting_for_a_cook = 0;
+    int ticks_waiting_for_storage = 0;
+    public Order(int ticks_remaining, int ID) 
+    {
+        ticks_awaited = ticks_remaining;
+        id = ID;
+    }
     public void SetCook(Cook new_cook)
     {
+        ticks_waiting_for_a_cook = ticks;
         CurrentCook = new_cook;
         Stage = OrderStatus.Cooking;
         CurrentCook.NewOrder();
@@ -350,6 +382,9 @@ class Order
         ticks++;
         switch (Stage)
         {
+            case OrderStatus.NoAvailableStorage:
+                ticks_waiting_for_storage++;
+                break;
             case OrderStatus.Cooking:
                 if (CurrentCook.GetStatus() == CookStatus.Waiting)
                 {
@@ -372,17 +407,13 @@ class Order
         if (CurrentCook == null || CurrentCourier == null || Stage != OrderStatus.Done) throw new Exception("This order wasn't finished");
         return ticks <= ticks_awaited;
     }
+    public float WaitForCookRatio()
+    {
+        return (float)ticks_waiting_for_a_cook / ticks;
+    }
+    public float WaitForStorageRatio()
+    {
+        return (float)ticks_waiting_for_storage / ticks;
+    }
 }
 
-class OrderTimeline
-{
-    public int ticks { get; set; }
-    public OrderTimeline(int ticks)
-    {
-        this.ticks = ticks;
-    }
-    public void Tick()
-    {
-        ticks--;
-    }
-}
