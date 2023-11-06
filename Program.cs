@@ -4,20 +4,6 @@ using System.Runtime.ExceptionServices;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 
-
-/* Предполагаем, что:
-   Есть всего лишь 1 вид пиццы
-   Есть только один дом для доставки
-
-   Максимальный рабочий стаж, сила и выносливость - 40
-   Максимальная вместимость очереди - 15 заказов
-   Параметр выносливости падает в течение дня, восстанавливается на следующий день
-   Всё время измеряется в минутах
-   Длительность рабочего дня определяется входными данными.
-   При поступлении нового заказа выбираем повара / курьера по системе очередей
-
-   Заказы тоже хранятся в файле: в виде INT_МИНУТ_БЕЗ_ЗАКАЗА\nINT_МИНУТ_БЕЗ_ЗАКАЗА ...*/
-
 List<Courier> couriers = new();
 List<Cook> cooks = new();
 
@@ -65,8 +51,9 @@ foreach (var courier in couriers)
     couriers_wait_for_orders.Enqueue(courier);
 }
 
-const int max_storage = 15;
-const int time_deliver = 110;
+const int max_storage = 10;
+//const int time_deliver = 200; для Semi-real example
+const int time_deliver = 90;
 int current_tick = 0;
 
 bool must_continue;
@@ -226,7 +213,7 @@ do
     {
         Console.Write($"{cooks[i].GetStatus()} ");
     }
-    Console.Write(" _ ");
+    Console.Write("_ ");
     for (int i = 0; i < orders_wait_for_courier.Count; i++)
     {
         Console.Write(".");
@@ -260,7 +247,7 @@ foreach (var order in orders_finished)
 
 Console.WriteLine("");
 //Если меньше 90% заказов были оплачены, ищем ошибки.
-if (succeded_orders / orders_finished.Count < 0.99)
+if (succeded_orders / orders_finished.Count < 0.9)
 {
     bool advice_given = false;
     List<int> done = new();
@@ -303,7 +290,6 @@ if (succeded_orders / orders_finished.Count < 0.99)
     if (ratios.Average() > 0.2)
     {
         Console.WriteLine("Нанять повара.");
-        advice_given = true;
     }
     ratios.Clear();
     for (int i = 0; i < orders_finished.Count; i++)
@@ -313,9 +299,7 @@ if (succeded_orders / orders_finished.Count < 0.99)
     if (ratios.Average() > 0.2)
     {
         Console.WriteLine("Увеличить пространство на складе.");
-        advice_given = true;
     }
-    if (advice_given) return;
     Console.WriteLine("Нанять курьера.");
 }
 else
@@ -323,97 +307,3 @@ else
     Console.WriteLine($"{succeded_orders / orders_finished.Count * 100}% заказов было доставлено вовремя");
     Console.WriteLine("Увеличить количество заказов.");
 }
-
-
-
-public enum OrderStatus
-{
-    NoAvailableCook = 0,
-    Cooking = 1,
-    NoAvailableStorage = 2,
-    Storing = 3,
-    Delivering = 4,
-    Done = 5
-}
-
-class Order
-{
-    public int id { get; }
-    OrderStatus Stage;
-    Cook? CurrentCook;
-    Courier? CurrentCourier;
-    int ticks = 0;
-    int ticks_awaited { get; }
-    int ticks_waiting_for_a_cook = 0;
-    int ticks_waiting_for_storage = 0;
-    public Order(int ticks_remaining, int ID) 
-    {
-        ticks_awaited = ticks_remaining;
-        id = ID;
-    }
-    public void SetCook(Cook new_cook)
-    {
-        ticks_waiting_for_a_cook = ticks;
-        CurrentCook = new_cook;
-        Stage = OrderStatus.Cooking;
-        CurrentCook.NewOrder();
-    }
-    public void FreeCook()
-    {
-        CurrentCook.Free();
-    }
-    public void SetCourier(Courier new_courier)
-    {
-        if (CurrentCook == null) throw new Exception("Setting courier before cook was set");
-        CurrentCourier = new_courier;
-        Stage = OrderStatus.Delivering;
-        CurrentCourier.NewOrder();
-    }
-    public Cook GetCook()
-    {
-        return CurrentCook;
-    }
-    public Courier GetCourier()
-    {
-        return CurrentCourier;
-    }
-    public bool Tick()
-    {
-        ticks++;
-        switch (Stage)
-        {
-            case OrderStatus.NoAvailableStorage:
-                ticks_waiting_for_storage++;
-                break;
-            case OrderStatus.Cooking:
-                if (CurrentCook.GetStatus() == CookStatus.Waiting)
-                {
-                    Stage = OrderStatus.NoAvailableStorage;
-                    return true;
-                }
-                break;
-            case OrderStatus.Delivering:
-                if (CurrentCourier.GetStatus() == CourierStatus.Free)
-                {
-                    Stage = OrderStatus.Done;
-                    return true;
-                }
-                break;
-        }
-        return false;
-    }
-    public bool IsInTime()
-    {
-        if (CurrentCook == null || CurrentCourier == null || Stage != OrderStatus.Done) throw new Exception("This order wasn't finished");
-        return ticks <= ticks_awaited;
-    }
-    public float WaitForCookRatio()
-    {
-        return (float)ticks_waiting_for_a_cook / ticks;
-    }
-    public float WaitForStorageRatio()
-    {
-        return (float)ticks_waiting_for_storage / ticks;
-    }
-}
-

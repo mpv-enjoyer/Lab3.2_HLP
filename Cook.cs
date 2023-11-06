@@ -27,9 +27,9 @@ class Cook
     public int NewOrder()
     {
         if (Status != CookStatus.Free) throw new Exception("This cook is not free.");
-        RemainingBusyTime = Math.Max(MaxTime * Experience / 80, MaxTime / 2);
+        RemainingBusyTime = Math.Max(MaxTime - Experience, MaxTime / 3);
         Status = CookStatus.InProcess;
-        return Math.Max(MaxTime * Experience / 80, MaxTime / 2);
+        return RemainingBusyTime;
     }
     public void Tick()
     {

@@ -31,7 +31,7 @@ class Courier
     }
     public int NewOrder()
     {
-        RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 3) * (40 - Strength / 3) / 1600, MaxTime / 2);
+        RemainingBusyTime = Math.Max(MaxTime * (40 - Stamina / 3) * (40 - Strength / 3) / 1600, MaxTime / 3);
         Stamina = (Stamina == 0) ? 0 : Stamina -= 1;
         status = CourierStatus.InProcess;
         if (capacity_left <= 0) throw new Exception("not enough capacity");
